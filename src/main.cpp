@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <DHT.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
@@ -15,12 +16,18 @@ constexpr uint32_t kTaskStackAutomation = 4096;
 constexpr uint32_t kTaskStackNetwork = 8192;
 constexpr float kUltrasonicTimeoutUs = 30000.0f;
 
+enum class SystemMode : uint8_t {
+  Auto,
+  Manual,
+};
+
 enum class DriveMode : uint8_t {
   Stop,
   Forward,
   PivotLeft,
   PivotRight,
   EmergencyBrake,
+  Backward,
 };
 
 struct TelemetryFrame {
@@ -29,16 +36,25 @@ struct TelemetryFrame {
   int rightIr = 0;
   float temperatureC = NAN;
   float humidityPct = NAN;
+  bool dhtOk = false;
   bool obstacleDetected = false;
   bool wifiConnected = false;
   DriveMode driveMode = DriveMode::Stop;
+  SystemMode systemMode = SystemMode::Auto;
   uint32_t uptimeMs = 0;
+};
+
+struct ControlState {
+  SystemMode systemMode = SystemMode::Auto;
+  DriveMode manualDriveCommand = DriveMode::Stop;
 };
 
 TaskHandle_t automationTaskHandle = nullptr;
 TaskHandle_t networkTaskHandle = nullptr;
 SemaphoreHandle_t telemetryMutex = nullptr;
+SemaphoreHandle_t controlMutex = nullptr;
 TelemetryFrame telemetryFrame;
+ControlState controlState;
 
 DHT dht(amts::DHT_PIN, DHT11);
 
@@ -46,14 +62,26 @@ bool credentialsConfigured(const char *value) {
   return value != nullptr && value[0] != '\0' && std::strncmp(value, "YOUR_", 5) != 0;
 }
 
+const char *systemModeToString(SystemMode mode) {
+  switch (mode) {
+    case SystemMode::Manual:
+      return "MANUAL";
+    case SystemMode::Auto:
+    default:
+      return "AUTO";
+  }
+}
+
 const char *driveModeToString(DriveMode mode) {
   switch (mode) {
     case DriveMode::Forward:
       return "forward";
     case DriveMode::PivotLeft:
-      return "pivot_left";
+      return "left";
     case DriveMode::PivotRight:
-      return "pivot_right";
+      return "right";
+    case DriveMode::Backward:
+      return "backward";
     case DriveMode::EmergencyBrake:
       return "emergency_brake";
     case DriveMode::Stop:
@@ -80,12 +108,32 @@ void setDriveMode(DriveMode mode) {
     case DriveMode::PivotRight:
       writeMotorOutputs(!amts::INVERT_LEFT_MOTOR, amts::INVERT_LEFT_MOTOR, amts::INVERT_RIGHT_MOTOR, !amts::INVERT_RIGHT_MOTOR);
       break;
+    case DriveMode::Backward:
+      writeMotorOutputs(amts::INVERT_LEFT_MOTOR, !amts::INVERT_LEFT_MOTOR, amts::INVERT_RIGHT_MOTOR, !amts::INVERT_RIGHT_MOTOR);
+      break;
     case DriveMode::EmergencyBrake:
     case DriveMode::Stop:
     default:
       writeMotorOutputs(false, false, false, false);
       break;
   }
+}
+
+void updateControlState(SystemMode mode, DriveMode cmd) {
+  if (controlMutex != nullptr && xSemaphoreTake(controlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    controlState.systemMode = mode;
+    controlState.manualDriveCommand = cmd;
+    xSemaphoreGive(controlMutex);
+  }
+}
+
+ControlState getControlState() {
+  ControlState state;
+  if (controlMutex != nullptr && xSemaphoreTake(controlMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    state = controlState;
+    xSemaphoreGive(controlMutex);
+  }
+  return state;
 }
 
 float readDistanceCm() {
@@ -130,7 +178,7 @@ bool readDhtSample(float &temperatureC, float &humidityPct) {
 
 String buildTelemetryJson(const TelemetryFrame &frame) {
   String json;
-  json.reserve(320);
+  json.reserve(380);
   json += '{';
   json += "\"device_id\":\"";
   json += amts::DEVICE_ID;
@@ -155,6 +203,12 @@ String buildTelemetryJson(const TelemetryFrame &frame) {
   json += ',';
   json += "\"obstacle_detected\":";
   json += (frame.obstacleDetected ? "true" : "false");
+  json += ',';
+  json += "\"system_mode\":\"";
+  json += systemModeToString(frame.systemMode);
+  json += "\",";
+  json += "\"dht_ok\":";
+  json += (frame.dhtOk ? "true" : "false");
   json += ',';
   json += "\"drive_mode\":\"";
   json += driveModeToString(frame.driveMode);
@@ -193,7 +247,7 @@ bool publishTelemetryToFirebase(const TelemetryFrame &frame) {
 
   http.addHeader("Content-Type", "application/json");
   const String payload = buildTelemetryJson(frame);
-  const int responseCode = http.POST(payload);
+  const int responseCode = http.PUT(payload);
   const bool success = responseCode > 0 && responseCode < 300;
 
   Serial.printf("[Network] Publish %s (HTTP %d)\n", success ? "OK" : "FAILED", responseCode);
@@ -211,6 +265,10 @@ void executeEmergencyBrake() {
 
 void driveForward() {
   setDriveMode(DriveMode::Forward);
+}
+
+void driveBackward() {
+  setDriveMode(DriveMode::Backward);
 }
 
 void pivotLeft() {
@@ -232,32 +290,110 @@ void loopAutomation(void *pvParameters) {
     const float distanceCm = readDistanceCm();
     const int leftIr = digitalRead(amts::LEFT_IR);
     const int rightIr = digitalRead(amts::RIGHT_IR);
+    const bool obstacleDetected = distanceCm > 0.0f && distanceCm <= amts::FRONT_OBSTACLE_STOP_CM;
+
+    ControlState ctrl = getControlState();
 
     TelemetryFrame frame = snapshotTelemetry();
     frame.distanceCm = distanceCm;
     frame.leftIr = leftIr;
     frame.rightIr = rightIr;
-    frame.obstacleDetected = distanceCm > 0.0f && distanceCm <= amts::FRONT_OBSTACLE_STOP_CM;
+    frame.obstacleDetected = obstacleDetected;
+    frame.systemMode = ctrl.systemMode;
 
-    if (frame.obstacleDetected) {
-      executeEmergencyBrake();
-      frame.driveMode = DriveMode::EmergencyBrake;
-    } else if (leftIr == LOW && rightIr == LOW) {
-      driveForward();
-      frame.driveMode = DriveMode::Forward;
-    } else if (leftIr == HIGH && rightIr == LOW) {
-      pivotLeft();
-      frame.driveMode = DriveMode::PivotLeft;
-    } else if (leftIr == LOW && rightIr == HIGH) {
-      pivotRight();
-      frame.driveMode = DriveMode::PivotRight;
+    if (ctrl.systemMode == SystemMode::Manual) {
+      // Manual Driving Mode
+      if (obstacleDetected && ctrl.manualDriveCommand == DriveMode::Forward) {
+        // Safety override: Halt manual forward movement if obstacle is detected
+        executeEmergencyBrake();
+        frame.driveMode = DriveMode::EmergencyBrake;
+      } else {
+        setDriveMode(ctrl.manualDriveCommand);
+        frame.driveMode = ctrl.manualDriveCommand;
+      }
     } else {
-      stopMotors();
-      frame.driveMode = DriveMode::Stop;
+      // Auto Line-Following Mode
+      if (obstacleDetected) {
+        executeEmergencyBrake();
+        frame.driveMode = DriveMode::EmergencyBrake;
+      } else if (leftIr == LOW && rightIr == LOW) {
+        driveForward();
+        frame.driveMode = DriveMode::Forward;
+      } else if (leftIr == HIGH && rightIr == LOW) {
+        pivotLeft();
+        frame.driveMode = DriveMode::PivotLeft;
+      } else if (leftIr == LOW && rightIr == HIGH) {
+        pivotRight();
+        frame.driveMode = DriveMode::PivotRight;
+      } else {
+        stopMotors();
+        frame.driveMode = DriveMode::Stop;
+      }
     }
 
     updateTelemetry(frame);
     vTaskDelay(pdMS_TO_TICKS(amts::AUTOMATION_PERIOD_MS));
+  }
+}
+
+void pollFirebaseControl() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!credentialsConfigured(amts::FIREBASE_DATABASE_URL) || !credentialsConfigured(amts::FIREBASE_AUTH_TOKEN)) return;
+
+  static WiFiClientSecure client;
+  static HTTPClient http;
+  static bool connectionInitialized = false;
+
+  if (!connectionInitialized) {
+    client.setInsecure();
+    http.setReuse(true);
+    connectionInitialized = true;
+  }
+
+  String url = String(amts::FIREBASE_DATABASE_URL);
+  if (!url.endsWith("/")) {
+    url += '/';
+  }
+  url += "control.json?auth=";
+  url += amts::FIREBASE_AUTH_TOKEN;
+
+  if (!http.begin(client, url)) {
+    Serial.println("[Network] Failed to begin control GET session.");
+    return;
+  }
+
+  int responseCode = http.GET();
+  if (responseCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      const char* sysModeStr = doc["system_mode"] | "AUTO";
+      const char* driveCmdStr = doc["drive_command"] | "stop";
+
+      SystemMode mode = SystemMode::Auto;
+      if (strcmp(sysModeStr, "MANUAL") == 0) {
+        mode = SystemMode::Manual;
+      }
+
+      DriveMode cmd = DriveMode::Stop;
+      if (strcmp(driveCmdStr, "forward") == 0) {
+        cmd = DriveMode::Forward;
+      } else if (strcmp(driveCmdStr, "backward") == 0) {
+        cmd = DriveMode::Backward;
+      } else if (strcmp(driveCmdStr, "left") == 0) {
+        cmd = DriveMode::PivotLeft;
+      } else if (strcmp(driveCmdStr, "right") == 0) {
+        cmd = DriveMode::PivotRight;
+      }
+
+      updateControlState(mode, cmd);
+    } else {
+      Serial.printf("[Network] JSON parse error: %s\n", error.c_str());
+    }
+  } else {
+    Serial.printf("[Network] Control poll failed, response code: %d\n", responseCode);
   }
 }
 
@@ -271,6 +407,8 @@ void loopNetworking(void *pvParameters) {
 
   unsigned long lastWifiAttemptMs = 0;
   unsigned long lastTelemetryAttemptMs = 0;
+  unsigned long lastControlPollMs = 0;
+  constexpr unsigned long kControlPollPeriodMs = 250;
 
   for (;;) {
     const unsigned long nowMs = millis();
@@ -297,15 +435,31 @@ void loopNetworking(void *pvParameters) {
       continue;
     }
 
-    TelemetryFrame frame = snapshotTelemetry();
-    frame.wifiConnected = true;
+    // Wi-Fi Connected
 
+    // 1. Poll control configurations
+    if (nowMs - lastControlPollMs >= kControlPollPeriodMs) {
+      pollFirebaseControl();
+      lastControlPollMs = nowMs;
+    }
+
+    // 2. Publish telemetry state
     if (nowMs - lastTelemetryAttemptMs >= amts::TELEMETRY_PERIOD_MS) {
       float temperatureC = NAN;
       float humidityPct = NAN;
       const bool dhtOk = readDhtSample(temperatureC, humidityPct);
+
+      TelemetryFrame frame = snapshotTelemetry();
+      frame.wifiConnected = true;
       frame.temperatureC = dhtOk ? temperatureC : NAN;
       frame.humidityPct = dhtOk ? humidityPct : NAN;
+      frame.dhtOk = dhtOk;
+
+      if (dhtOk) {
+        Serial.printf("[Core 0] DHT11 temp=%.2f C humidity=%.2f %%\n", temperatureC, humidityPct);
+      } else {
+        Serial.println("[Core 0] DHT11 read failed; sending null temperature and humidity.");
+      }
 
       const bool published = publishTelemetryToFirebase(frame);
       if (published) {
@@ -316,7 +470,7 @@ void loopNetworking(void *pvParameters) {
       lastTelemetryAttemptMs = nowMs;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(250));
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
@@ -338,8 +492,9 @@ void setup() {
   stopMotors();
 
   telemetryMutex = xSemaphoreCreateMutex();
-  if (telemetryMutex == nullptr) {
-    Serial.println("[Setup] Failed to create telemetry mutex.");
+  controlMutex = xSemaphoreCreateMutex();
+  if (telemetryMutex == nullptr || controlMutex == nullptr) {
+    Serial.println("[Setup] Failed to create telemetry or control mutex.");
     while (true) {
       delay(1000);
     }

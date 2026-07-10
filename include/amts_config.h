@@ -21,10 +21,10 @@ constexpr float OBSTACLE_STOP_CM = 15.0f;
 constexpr float FRONT_OBSTACLE_STOP_CM = 20.0f;
 
 constexpr char DEVICE_ID[] = "amts-esp32u";
-constexpr char WIFI_SSID[] = "YOUR_SSID";
-constexpr char WIFI_PASSWORD[] = "YOUR_PASSWORD";
-constexpr char FIREBASE_DATABASE_URL[] = "YOUR_FIREBASE_DATABASE_URL";
-constexpr char FIREBASE_AUTH_TOKEN[] = "YOUR_FIREBASE_AUTH_TOKEN";
+constexpr char WIFI_SSID[]     = "SLT-Fiber-2.4G";
+constexpr char WIFI_PASSWORD[] = "22863656@";
+constexpr char FIREBASE_DATABASE_URL[] = "https://mts-vehicle-system-default-rtdb.firebaseio.com";
+constexpr char FIREBASE_AUTH_TOKEN[]   = "oH0vXLzI8WEYoU0EJJPP0FhkSr7NojxwT9tYjog9";
 
 constexpr bool INVERT_LEFT_MOTOR = true;
 constexpr bool INVERT_RIGHT_MOTOR = true;

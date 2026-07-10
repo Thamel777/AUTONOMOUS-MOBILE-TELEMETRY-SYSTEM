@@ -54,10 +54,11 @@ If the car only follows the line in the wrong direction, your IR sensor polarity
 
 1. Install the PlatformIO extension.
 2. Open this folder as a PlatformIO project.
-3. Connect the ESP32 over USB.
-4. In the PlatformIO sidebar, choose **Build** first to confirm the code compiles.
-5. Then choose **Upload**.
-6. Open the serial monitor at `115200` baud if you want to watch connection and telemetry logs.
+3. Disconnect the motor driver and sensors from the ESP32 while uploading if possible.
+4. Connect the ESP32 over USB with a short data-capable cable.
+5. In the PlatformIO sidebar, choose **Build** first to confirm the code compiles.
+6. Then choose **Upload**.
+7. Open the serial monitor at `115200` baud if you want to watch connection and telemetry logs.
 
 ### From the terminal
 
@@ -69,12 +70,23 @@ If PlatformIO is installed in the standard Windows location, run:
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" device monitor --baud 115200
 ```
 
+If upload still fails with flash communication or packet transfer errors, try holding the ESP32 BOOT button during the start of upload, then releasing it once flashing begins.
+
 ## What the firmware does
 
 1. Core 1 reads the ultrasonic sensor and IR sensors every 15 ms.
 2. If an obstacle is within 15 cm, the motors stop immediately.
 3. Core 0 handles Wi-Fi reconnects and telemetry publishing every 5 seconds.
 4. Telemetry is sent as JSON to your Firebase RTDB endpoint.
+
+The telemetry payload includes:
+
+1. `temperature_c` from the DHT11
+2. `humidity_pct` from the DHT11
+3. `dht_ok` to show whether the sensor read succeeded
+4. `distance_cm`, `left_ir`, `right_ir`, `obstacle_detected`, `drive_mode`, `wifi_connected`, `wifi_rssi_dbm`, and `uptime_ms`
+
+The data is written to the `telemetry` node in Firebase RTDB.
 
 The ultrasonic sensor is treated as the front-stop sensor. In the code, `FRONT_OBSTACLE_STOP_CM` sets the distance where the car must halt when something is directly in front of it.
 
