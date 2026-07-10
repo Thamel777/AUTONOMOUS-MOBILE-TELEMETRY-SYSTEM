@@ -40,12 +40,12 @@ struct TelemetryFrame {
   bool obstacleDetected = false;
   bool wifiConnected = false;
   DriveMode driveMode = DriveMode::Stop;
-  SystemMode systemMode = SystemMode::Auto;
+  SystemMode systemMode = SystemMode::Manual;
   uint32_t uptimeMs = 0;
 };
 
 struct ControlState {
-  SystemMode systemMode = SystemMode::Auto;
+  SystemMode systemMode = SystemMode::Manual;
   DriveMode manualDriveCommand = DriveMode::Stop;
 };
 
@@ -100,16 +100,16 @@ void writeMotorOutputs(bool in1, bool in2, bool in3, bool in4) {
 void setDriveMode(DriveMode mode) {
   switch (mode) {
     case DriveMode::Forward:
-      writeMotorOutputs(!amts::INVERT_LEFT_MOTOR, amts::INVERT_LEFT_MOTOR, !amts::INVERT_RIGHT_MOTOR, amts::INVERT_RIGHT_MOTOR);
-      break;
-    case DriveMode::PivotLeft:
-      writeMotorOutputs(amts::INVERT_LEFT_MOTOR, !amts::INVERT_LEFT_MOTOR, !amts::INVERT_RIGHT_MOTOR, amts::INVERT_RIGHT_MOTOR);
-      break;
-    case DriveMode::PivotRight:
-      writeMotorOutputs(!amts::INVERT_LEFT_MOTOR, amts::INVERT_LEFT_MOTOR, amts::INVERT_RIGHT_MOTOR, !amts::INVERT_RIGHT_MOTOR);
+      writeMotorOutputs(true, false, true, false); // Left Forward (IN1=HIGH, IN2=LOW), Right Forward (IN3=HIGH, IN4=LOW)
       break;
     case DriveMode::Backward:
-      writeMotorOutputs(amts::INVERT_LEFT_MOTOR, !amts::INVERT_LEFT_MOTOR, amts::INVERT_RIGHT_MOTOR, !amts::INVERT_RIGHT_MOTOR);
+      writeMotorOutputs(false, true, false, true); // Left Reverse (IN1=LOW, IN2=HIGH), Right Reverse (IN3=LOW, IN4=HIGH)
+      break;
+    case DriveMode::PivotLeft:
+      writeMotorOutputs(false, true, true, false); // Left Reverse (IN1=LOW, IN2=HIGH), Right Forward (IN3=HIGH, IN4=LOW)
+      break;
+    case DriveMode::PivotRight:
+      writeMotorOutputs(true, false, false, true); // Left Forward (IN1=HIGH, IN2=LOW), Right Reverse (IN3=LOW, IN4=HIGH)
       break;
     case DriveMode::EmergencyBrake:
     case DriveMode::Stop:
@@ -397,6 +397,39 @@ void pollFirebaseControl() {
   }
 }
 
+bool initializeControlOnFirebase() {
+  if (!credentialsConfigured(amts::FIREBASE_DATABASE_URL) || !credentialsConfigured(amts::FIREBASE_AUTH_TOKEN)) {
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  String url = String(amts::FIREBASE_DATABASE_URL);
+  if (!url.endsWith("/")) {
+    url += '/';
+  }
+  url += "control.json?auth=";
+  url += amts::FIREBASE_AUTH_TOKEN;
+
+  if (!http.begin(client, url)) {
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  int responseCode = http.PUT("{\"system_mode\":\"MANUAL\",\"drive_command\":\"stop\"}");
+  http.end();
+
+  if (responseCode > 0 && responseCode < 300) {
+    Serial.println("[Network] Control endpoints initialized to MANUAL and stop on Firebase.");
+    return true;
+  } else {
+    Serial.printf("[Network] Control initialization failed: HTTP %d\n", responseCode);
+    return false;
+  }
+}
+
 void loopNetworking(void *pvParameters) {
   (void)pvParameters;
 
@@ -409,6 +442,7 @@ void loopNetworking(void *pvParameters) {
   unsigned long lastTelemetryAttemptMs = 0;
   unsigned long lastControlPollMs = 0;
   constexpr unsigned long kControlPollPeriodMs = 250;
+  bool controlInitialized = false;
 
   for (;;) {
     const unsigned long nowMs = millis();
@@ -436,6 +470,13 @@ void loopNetworking(void *pvParameters) {
     }
 
     // Wi-Fi Connected
+
+    // Force control modes to manual on boot
+    if (!controlInitialized) {
+      if (initializeControlOnFirebase()) {
+        controlInitialized = true;
+      }
+    }
 
     // 1. Poll control configurations
     if (nowMs - lastControlPollMs >= kControlPollPeriodMs) {
