@@ -72,13 +72,13 @@ void writeMotorOutputs(bool in1, bool in2, bool in3, bool in4) {
 void setDriveMode(DriveMode mode) {
   switch (mode) {
     case DriveMode::Forward:
-      writeMotorOutputs(true, false, true, false);
+      writeMotorOutputs(!amts::INVERT_LEFT_MOTOR, amts::INVERT_LEFT_MOTOR, !amts::INVERT_RIGHT_MOTOR, amts::INVERT_RIGHT_MOTOR);
       break;
     case DriveMode::PivotLeft:
-      writeMotorOutputs(false, true, true, false);
+      writeMotorOutputs(amts::INVERT_LEFT_MOTOR, !amts::INVERT_LEFT_MOTOR, !amts::INVERT_RIGHT_MOTOR, amts::INVERT_RIGHT_MOTOR);
       break;
     case DriveMode::PivotRight:
-      writeMotorOutputs(true, false, false, true);
+      writeMotorOutputs(!amts::INVERT_LEFT_MOTOR, amts::INVERT_LEFT_MOTOR, amts::INVERT_RIGHT_MOTOR, !amts::INVERT_RIGHT_MOTOR);
       break;
     case DriveMode::EmergencyBrake:
     case DriveMode::Stop:
@@ -237,12 +237,12 @@ void loopAutomation(void *pvParameters) {
     frame.distanceCm = distanceCm;
     frame.leftIr = leftIr;
     frame.rightIr = rightIr;
-    frame.obstacleDetected = distanceCm > 0.0f && distanceCm <= amts::OBSTACLE_STOP_CM;
+    frame.obstacleDetected = distanceCm > 0.0f && distanceCm <= amts::FRONT_OBSTACLE_STOP_CM;
 
     if (frame.obstacleDetected) {
       executeEmergencyBrake();
       frame.driveMode = DriveMode::EmergencyBrake;
-    } else if (leftIr == HIGH && rightIr == HIGH) {
+    } else if (leftIr == LOW && rightIr == LOW) {
       driveForward();
       frame.driveMode = DriveMode::Forward;
     } else if (leftIr == HIGH && rightIr == LOW) {

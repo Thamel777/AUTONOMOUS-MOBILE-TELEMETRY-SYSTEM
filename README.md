@@ -44,6 +44,10 @@ Open [include/amts_config.h](include/amts_config.h) and replace the placeholder 
 
 If those values stay as `YOUR_...`, the firmware will compile but it will skip Wi-Fi connection attempts and telemetry publishing.
 
+If the car drives backward when the firmware is telling it to go forward, set `INVERT_LEFT_MOTOR` or `INVERT_RIGHT_MOTOR` to `true` in [include/amts_config.h](include/amts_config.h). You can also swap the two motor wires on the affected L298N output channel.
+
+If the car only follows the line in the wrong direction, your IR sensor polarity may also be inverted. In that case, keep the motor direction as-is and adjust the IR logic in [src/main.cpp](src/main.cpp) after confirming the sensor outputs with Serial prints.
+
 ## Upload Instructions
 
 ### In VS Code
@@ -71,6 +75,8 @@ If PlatformIO is installed in the standard Windows location, run:
 2. If an obstacle is within 15 cm, the motors stop immediately.
 3. Core 0 handles Wi-Fi reconnects and telemetry publishing every 5 seconds.
 4. Telemetry is sent as JSON to your Firebase RTDB endpoint.
+
+The ultrasonic sensor is treated as the front-stop sensor. In the code, `FRONT_OBSTACLE_STOP_CM` sets the distance where the car must halt when something is directly in front of it.
 
 ## Quick build check
 
